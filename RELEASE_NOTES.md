@@ -6,6 +6,12 @@
 >
 > Numéro de version applicatif des fichiers exportés : **2.6** (schéma d'export interne).
 
+## Titre de la release / Release title
+
+```
+V1.96 — Complete FR/EN translation & fixes
+```
+
 ---
 
 ## 🇫🇷 Français
