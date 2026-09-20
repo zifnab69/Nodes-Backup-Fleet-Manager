@@ -49,3 +49,5 @@ venv_NBFM*/
 .idea/
 Thumbs.db
 desktop.ini
+# Fichiers verrou Word/Office (apparaissent quand on ouvre un .md dans Word)
+~$*
