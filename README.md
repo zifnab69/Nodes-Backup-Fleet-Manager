@@ -50,7 +50,7 @@ protobuf
 
 ```bash
 pip install meshtastic pyserial protobuf
-python NBFM_V1.95.py
+python NBFM_V1.96.py
 ```
 
 ### Running the standalone EXE
@@ -184,7 +184,7 @@ protobuf
 
 ```bash
 pip install meshtastic pyserial protobuf
-python NBFM_V1.95.py
+python NBFM_V1.96.py
 ```
 
 ### Depuis l'EXE autonome

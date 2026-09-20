@@ -6,7 +6,7 @@
 
 ## Table des matières
 
-- [**État du projet — 12 juillet 2026 (lire en premier)**](#état-du-projet--12-juillet-2026-lire-en-premier)
+- [**État du projet — 20 septembre 2026 (lire en premier)**](#état-du-projet--20-septembre-2026-lire-en-premier)
 1. [Objectif global](#1-objectif-global)
 2. [Contexte technique](#2-contexte-technique)
 3. [Structure du projet](#3-structure-du-projet)
@@ -20,17 +20,20 @@
 
 ---
 
-## État du projet — 12 juillet 2026 (lire en premier)
+## État du projet — 20 septembre 2026 (lire en premier)
 
 ### ▶ POUR REPRENDRE LA PROCHAINE FOIS
 
-- **Fichier de travail actif** : `NBFM_V1.95.py` (= `NBFM_20260812_1321.py` renommé pour le partage ; ~4110 lignes, fichier unique). Compile OK. Fonctionnel sur matériel réel (T-Echo, Heltec V3, **Heltec V4**). Le nommage de travail reste `NBFM_YYYYMMDD_HHMM.py` ; un `NBFM_Vx.y.py` est un renommage pour le partage. **Avant la prochaine modif** : copier `NBFM_V1.95.py` dans `Backup/` puis le renommer en `NBFM_YYYYMMDD_HHMM.py` (protocole de versioning).
-- **État** : application stable. **Aucun bug bloquant.** Tous les bugs A, B, C, E–L sont corrigés et validés. **Seul Bug D reste ouvert** (basse priorité, neutralisé — voir §Bug D).
+- **Fichier de travail actif** : `NBFM_V1.96.py` (= `NBFM_20260920_1704.py` renommé pour partage ; ~4320 lignes, fichier unique). Compile OK. Fonctionnel sur matériel réel (T-Echo, Heltec V3, **Heltec V4**). Le nommage de travail reste `NBFM_YYYYMMDD_HHMM.py` ; un `NBFM_Vx.y.py` est un renommage pour le partage. Prédécesseur `NBFM_V1.95.py` dans `Backup/`. **Avant la prochaine modif** : copier l'actif dans `Backup/` puis le renommer en `NBFM_YYYYMMDD_HHMM.py` (protocole de versioning).
+- ⚠ **`NBFM_V1.95.exe` à la racine du dépôt est périmé** (compilé depuis la v1.95) — à reconstruire via PyInstaller et à remplacer lors de la publication de la release.
+- **Version affichée : v1.96** (docstring d'en-tête, titre de fenêtre, en-tête d'écran, pied de l'onglet Aide — 4 occurrences, à bumper ensemble). À ne pas confondre avec `_app_version` (= `"2.6"`), qui versionne le **format de fichier** `.NBFM` et n'a pas bougé.
+- **État** : application stable. **Aucun bug bloquant.** Tous les bugs A, B, C, E–M sont corrigés et validés. **Seul Bug D reste ouvert** (basse priorité, neutralisé — voir §Bug D).
 - **Avant toute modif** : appliquer le protocole de versioning (timestamp FR → copie dans `Backup/` → renommer en `NBFM_YYYYMMDD_HHMM.py` → modifier → `py_compile`).
 - **Environnement critique** : **protobuf 7.34.1 / Python 3.14** (voir Pièges). Toujours tester en intégration avec un faux nœud + vrais protos `localonly_pb2`/`channel_pb2`.
 - **⚠ Décision d'architecture MODIFIÉE (1519)** : l'ordre d'écriture des canaux est passé de « primaire en DERNIER » à « **primaire en PREMIER** » (aligné sur `setURL` du CLI Meshtastic). Voir §Pièges et §8/§9.
 - **Test GUI possible sans écran** : Tkinter fonctionne en headless dans l'env de dev. On smoke-teste une fenêtre en construisant la méthode avec un faux `self` (attributs `root/lang_var/work_dir/_get_selected_file/refresh_files/set_status/_edit_popup_refresh`), puis `.invoke()` sur les boutons + relecture du fichier produit (a validé l'éditeur en onglets : build + save).
 - **Session 12/07/2026** : injection canaux robuste (ordre + relance), éditeur 2 onglets (canaux activables + précision GPS + ADC multiplier), auto-activation au nom + tassement des canaux, `view_file` éditable, journaux d'import copiables, fix `connect_device`. Tous validés (compile + smoke-tests headless). Commit/renommage effectué par l'utilisateur (GitHub Desktop).
+- **Session 20/09/2026** : **bilinguisme complet** — toutes les chaînes affichées passent désormais par `UI_STRINGS`/`tr()` (détail dans « Travaux récents », règles dans §7 « Langue et UI »). Aucune autre fonction touchée.
 
 ### ★ Pistes d'évolution proposées (rappel demandé par l'utilisateur)
 
@@ -46,10 +49,28 @@
 | Icône d'application pour l'EXE | basse | `--icon=nbfm.ico` |
 | Auto-détection port par VID/PID (CP210x/CH340) | basse | Pré-sélection plus fine |
 | Mode ligne de commande (sans GUI) | basse | Automatisation de flotte |
+| ✅ Bug M — preset modem `VERY_LONG_SLOW` | — | **FAIT (1704)** — comparaison exacte du code en tête de libellé |
 | Bug D — `statusmessage` inscriptible | basse | Voie alternative API à investiguer |
 
 ### Travaux récents (résumé)
 
+- **Bug M + nettoyage Ruff (20260920_1704)** : correction de `_modem_int_from_label` (voir §Bug M) et des 28 remarques Ruff **hors convention projet** :
+  - **TRY002** (4) : nouvelle classe `NBFMError(Exception)` en tête de fichier, utilisée par `connect_device` (3 sites) et la sentinelle interne `"vide"` de `export_full_config`. Tous les appelants font `except Exception` → comportement strictement identique, seul le type se précise.
+  - **DTZ005** (9) : les **7** sites `strftime` (noms de fichiers, affichage) passent en `datetime.now().astimezone()` — sortie identique au caractère près, vérifié. Les **2** sites qui écrivent `_export_date` / `_profile_date` **dans le .NBFM** gardent volontairement l'heure locale **naïve** (`# noqa: DTZ005` + commentaire) : y ajouter un décalage changerait le format de fichier documenté au §5. Décision validée avec l'utilisateur.
+  - **F401** (2) : `import … , time` redondant retiré de `connect_device` (le module l'importe déjà) ; l'import `ParseDict` d'`import_full_config` est **conservé** avec `# noqa: F401` — il ne sert pas au code mais de **sonde de disponibilité** du stack protobuf, le retirer casserait le garde `except ImportError`.
+  - **F841** (2) : `cur` (dans `_apply_lang`) et `grp_iid` (dans `refresh_files`) étaient assignés sans être lus ; l'appel `tree.insert(...)` est conservé, seule l'affectation morte disparaît.
+  - **C414** (1) `sorted(list(glob))` → `sorted(glob)` · **SIM102** (1) `if warns:` / `if not askyesno` fusionnés en `and` (court-circuit ⇒ `askyesno` toujours appelé seulement si `warns`) · **I001** (4) blocs d'imports triés · **UP006/UP045/UP035** (5) `Dict[str, Any]` → `dict[str, Any]`, `Optional[X]` → `X | None` (OK dès Python 3.10, cible du projet).
+  - **NON corrigé, volontairement** : les **108 `BLE001`** (blind-except) et **43 `S110`** (try-except-pass) restants. C'est la convention explicite du §7 « Gestion des erreurs » (*broad `try/except Exception` partout — priorité à la robustesse sur la précision*, *ne jamais supprimer un fallback existant*). Les corriger contredirait la règle n°1 « zéro régression ». **Un `ruff check` sans `--select` renverra donc toujours 151 remarques : c'est normal, ne pas les « corriger ».** La vérification de référence est `--select E9,F63,F7,F82`.
+- **Nom du profil flotte bilingue + v1.96 (20260920_1704)** : le nom suggéré à la création d'un profil flotte suit désormais la langue — nouvelle clé `fleet_filename` (`profil_flotte_{date}.NBFM` en FR, `fleet_profile_{date}.NBFM` en EN), utilisée dans `generate_fleet_profile`. **Les deux conventions sont totalement interchangeables** : le type d'un fichier vient de `_profile_type` dans le JSON, **jamais** de son nom — aucun code ne teste le préfixe. Vérifié par test : un `profil_flotte_*.NBFM` s'affiche « 🚀 Fleet » en anglais, un `fleet_profile_*.NBFM` s'affiche « 🚀 Flotte » en français, et les deux déclenchent l'alerte « déjà un profil flotte » dans les deux langues. Version affichée passée à **v1.96**. Ruff `E9,F63,F7,F82` : `All checks passed!`.
+- **Bilinguisme complet FR/EN (20260920_1704)** : un utilisateur signalait des popups restés en français en mode anglais. Cause : de nombreuses chaînes affichées étaient codées en dur en FR **alors que la clé `UI_STRINGS` existait déjà** (`popup_restore_confirm_text`, `popup_fleet_created_text`, `popup_multi_import_done_text`, `deps_missing_*`…) — elles n'étaient simplement pas utilisées. Corrigé partout, sans toucher à la logique :
+  - **Cœur (hors UI)** : `check_dependencies`, `_apply_security_to_node`, `_apply_section_to_node`, `_apply_module_section` et **tout le journal de `import_full_config`** passent par `tr()`. ~40 nouvelles clés `log_*` (préfixes `log_section_`, `log_module_`, `log_tx_`, `log_owner_`, `log_ch_`, `log_sec_`).
+  - **UI** : libellés de type (`🚀 Flotte`/`💾 Backup`), en-tête de groupe « Autres », note « COM1 exclu », filtre de fichiers « Tous », popups export/flotte/intégrité/confirmation de restauration/session multi-nœuds, en-têtes des journaux copiables, avertissement « Redémarrez l'appareil ».
+  - **Rapport HTML** : titre, ligne « Généré », les 13 en-têtes de colonnes et l'attribut `<html lang=…>` suivent la langue (il était entièrement en anglais dans les deux langues).
+  - **Régions LoRa / presets modem** : `LORA_REGIONS`/`MODEM_PRESETS` (FR) restent la **source de vérité** des codes et de l'ordre ; deux tables `LORA_REGIONS_EN`/`MODEM_PRESETS_EN` ont été ajoutées **à côté**, plus `_region_desc(i)`/`_modem_desc(i)` qui choisissent selon `load_lang()`. Seule la partie descriptive du libellé change : le code (`EU_868`) et l'index (`[3]`) restent intacts, donc `_region_int_from_label`/`_modem_int_from_label` fonctionnent dans les deux langues.
+  - **Piège évité** : dans `_do_import`, la lecture de `self.lang_var` reste **dans le `lambda`** passé à `root.after` — jamais dans le corps du thread de travail (règle Threading du §7).
+  - **Piège f-string** : dans le bloc HTML `f"""…"""`, les expressions utilisent des guillemets **simples** (`{T['report_col_type']}`) — les guillemets doubles imbriqués ne sont valides qu'à partir de Python 3.12 alors que le projet cible 3.10+.
+  - **Non touché volontairement** : `_profile_note` de `build_fleet_profile` (écrit **dans le fichier** .NBFM — le localiser rendrait le format dépendant de la langue), le sentinelle interne `tag` (`🚀FLOTTE`/`💾BACKUP` de `read_file_meta`, jamais affiché, comparé par `startswith`/`in`), l'id de colonne Treeview `"fichier"`, et les noms de fichiers suggérés (`profil_flotte_…`, `_copie_`) qui sont une convention documentée au §7.
+  - **Validation** : `py_compile` OK ; parité des 294 clés FR/EN + placeholders identiques ; les 242 clés référencées dans le code existent dans les deux langues ; **journal d'import FR identique octet pour octet à v1.95** (test d'intégration faux nœud + vrais protos `localonly_pb2`/`channel_pb2`, cas nominal ET rejet silencieux d'un secondaire), libellés région/modem FR identiques à v1.95 sur toutes les valeurs y compris hors bornes, textes de popups FR identiques à v1.95, smoke-test GUI headless FR+EN (liste, confirmation de restauration, profil flotte, rapport HTML, éditeur : ouverture + sauvegarde).
 - **Ascenseur global / petits écrans (20260812_1321)** : sur écran bas, le bloc « Restaurer » (packé en dernier) disparaissait — pack sert les widgets dans l'ordre de déclaration. Trois helpers dans `NBFMApp` : `_fit_to_screen(win, w, h)` (borne la géométrie à l'écran, ne l'agrandit jamais — appliqué à la fenêtre principale et à l'éditeur), `_make_scrollable(parent)` → `(outer, inner)` (Canvas + Scrollbar ; l'ascenseur n'apparaît QUE si `inner.reqheight > canvas.height`, sinon `inner` est étiré à la hauteur du canvas → l'`expand=True` de la liste de fichiers se comporte comme avant), `_bind_mousewheel_global()` (UN seul `bind_all("<MouseWheel>")` : remonte la hiérarchie depuis le widget survolé, ignore Treeview/Text/Listbox qui défilent seuls, sinon défile le premier Canvas marqué `_nbfm_scroll`). Appliqué à : onglet principal (barre de statut sortie de la zone défilante et packée `before=` le conteneur pour être servie en premier), onglets Principal/Canaux de l'éditeur (le notebook reçoit `page_main`/`page_chan`, le contenu va dans les frames internes `tab_main`/`tab_chan` — `nb.tab()` doit viser les `page_*`), et l'onglet Aide (son ancien `bind_all` local défilait l'aide en arrière-plan quand on scrollait ailleurs — supprimé). **Éditeur** : `frm_cleanup` + `btn_row` créés AVANT le notebook et packés `side="bottom"` → boutons Enregistrer/Annuler toujours visibles (validé jusqu'à 300 px de haut). Smoke-tests headless : ascenseur présent à 420/600 px, absent à 900 px ; save de l'éditeur toujours fonctionnel.
 - **Éditeur en onglets + canal « activable » (1519b)** : `edit_config_fields` passé en `ttk.Notebook` 2 onglets. **Onglet Canaux** : les 8 canaux, chacun avec case **« Activé »** (→ `role`=SECONDARY si coché, DISABLED sinon ; canal 0 = PRIMARY verrouillé), nom, PSK, **précision GPS** compacte (`module_settings.position_precision` via `POSITION_PRECISION` NA/23km…/1m), + générateur de clés. **Onglet Principal** : owner/LoRa/rôle + **ADC multiplier** (champ éditable + menu `ADC_DEFAULTS` par appareil ; vide = clé supprimée). **Bug corrigé** : l'ancien éditeur écrivait nom+PSK d'un canal mais JAMAIS son `role` → un canal nommé restait `role=0` (désactivé sur l'appareil). Désormais le save reconstruit les 8 canaux avec le bon rôle. `save_and_close` : rebuild 8 canaux (préserve champs annexes), validation PSK/doublons sur 8 canaux, écriture ADC. Case « Supprimer réglages puissance (ADC) » retirée (doublon).
 - **Auto-activation + tassement des canaux (1519c)** : deux correctifs liés au rôle des canaux. (1) **Auto-cocher « Activé » quand on tape un nom** (`nm_var.trace_add`) — sinon un nom saisi dans une ligne vide restait décoché → `role=0` → canal importé « désactivé » (cause d'un bug remonté : canal « bidule » nommé mais désactivé, PSK en hex = signature de l'éditeur). (2) **Tassement (compaction) au save** façon `deleteChannel` Meshtastic : primaire en 0, secondaires ACTIVÉS packés en 1,2,3… **sans trou**, reste en DISABLED vide. Décocher un canal du milieu ne laisse donc jamais de trou (un trou = canal désactivé au milieu d'actifs = non standard, canaux suivants potentiellement masqués). Validé par smoke-tests headless (build + save → canal nommé ressort role=2 ; trou supprimé ; saisie d'un nom auto-active + packe).
@@ -65,8 +86,8 @@
 
 ### Script actif
 
-`NBFM_V1.95.py` (= `NBFM_20260812_1321.py` renommé pour partage ; ~4110 lignes, fichier unique).  
-Backup du prédécesseur dans `Backup/` : `NBFM_V1.9.py`, puis `NBFM_V1.8.py` (= ancien actif renommé par l'utilisateur pour partage). Anciennes versions numérotées dans `Old release/`.
+`NBFM_V1.96.py` (= `NBFM_20260920_1704.py` renommé pour partage ; ~4320 lignes, fichier unique).  
+Backup du prédécesseur dans `Backup/` : `NBFM_V1.95.py`, plus la copie horodatée `NBFM_20260920_1704.py`. Anciennes versions numérotées dans `Old release/`.
 
 ### Pièges & leçons techniques durables (À LIRE avant de toucher export/import)
 - **protobuf 7.x (upb)** : ne JAMAIS supposer l'API descriptor. Utiliser `field.is_repeated` (pas `.label`).
@@ -107,8 +128,8 @@ L'application est **fonctionnelle et utilisée sur matériel réel** (T-Echo, He
 
 Tous les bugs historiques sont **résolus** : A, B (persistance langue/dossier), C (suppression known_nodes),
 E (LoRa no-op / protobuf 7.x), F (bruit `statusmessage`), G (clé session admin / transaction), H/I (enums →
-tableau + ordre canaux), J (PSK effaçable), K (noms canaux en double), L (PSK base64 vs hex). **Seul Bug D
-reste ouvert** (basse priorité, neutralisé) :
+tableau + ordre canaux), J (PSK effaçable), K (noms canaux en double), L (PSK base64 vs hex),
+M (preset modem `VERY_LONG_SLOW`). **Seul Bug D reste ouvert** (basse priorité, neutralisé) :
 
 #### Bug D — `statusmessage` non inscriptible (priorité basse — neutralisé, plus bloquant)
 **État (mis à jour 30/05)** : le proto `moduleConfig.statusmessage` EXISTE désormais (protobuf récent), mais
@@ -116,6 +137,21 @@ reste ouvert** (basse priorité, neutralisé) :
 et le `print` parasite est avalé (`_write_config_quiet`). Donc **plus de crash ni de bruit shell** ; le module
 est simplement ignoré (ligne `⚠` dans le popup). Reste théoriquement non restaurable via l'API Python standard.
 **À investiguer un jour** : voie alternative pour écrire `statusmessage` (peut-être un module interne non exposé).
+
+#### Bug M — preset modem `VERY_LONG_SLOW` mal relu dans l'éditeur — ✅ CORRIGÉ (1704)
+**Découvert le 20/09/2026**, **présent à l'identique dans v1.95 et antérieures** (donc pas une régression du
+bilinguisme — juste mis en évidence par les tests d'aller-retour ajoutés). `_modem_int_from_label()` testait
+`if code in label` en parcourant `MODEM_PRESETS` dans l'ordre 0→8 : pour le libellé `VERY_LONG_SLOW    — …`,
+le code `LONG_SLOW` (index **1**) est une sous-chaîne de `VERY_LONG_SLOW` et matchait **avant** l'index 2.
+**Conséquence** : choisir « VeryLongSlow » dans l'éditeur enregistrait `modem_preset = 1` (LongSlow).
+**Correctif appliqué** : `_modem_labels()` construit le libellé sous la forme `"<CODE>    — <desc>"`, donc le
+code est le PREMIER token → comparaison **exacte** sur `label.split(" ", 1)[0]`. Le repli en sous-chaîne est
+**conservé** (libellé d'autre provenance, tronqué…) mais parcourt désormais les codes **du plus long au plus
+court**, pour que `VERY_LONG_SLOW` soit testé avant `LONG_SLOW`.
+**Validé** : aller-retour `_modem_label_from_int` → `_modem_int_from_label` correct sur les 9 presets, en FR
+ET en EN, plus les cas de repli (`"VERY_LONG_SLOW"` nu, libellé noyé dans une phrase, chaîne vide).
+⚠ **Les fichiers .NBFM créés avant ce correctif avec « VeryLongSlow » contiennent `modem_preset = 1`** :
+rien ne les corrige automatiquement, il faut repasser dans l'éditeur si le preset comptait.
 
 ### Règles non négociables pour toute modification
 
@@ -194,7 +230,7 @@ pip install meshtastic pyserial protobuf
 
 ```
 Nodes-Backup-Fleet-Manager/
-├── NBFM_20260531_0001.py     ← script principal actif (~3460 lignes) — voir « Script actif » pour le nom exact
+├── NBFM_V1.96.py             ← script principal actif (~4320 lignes) — voir « Script actif » pour le nom exact
 ├── Backup/                   ← versions horodatées précédentes (protocole de versioning)
 ├── RELEASE_NOTES.md          ← notes de version GitHub (bilingue)
 ├── README.md                 ← documentation bilingue FR/EN
@@ -281,7 +317,7 @@ Le fichier de référence utilise l'extension `.nbfm` (minuscules). Le code rech
 
 ### Organisation actuelle — fichier unique
 
-Le script actif (voir « Script actif » pour le nom horodaté exact) contient tout le code (~3460 lignes).
+Le script actif (voir « Script actif » pour le nom exact) contient tout le code (~4320 lignes).
 Sections principales dans l'ordre (⚠ numéros de ligne **approximatifs** — ils dérivent à chaque édition ;
 **se fier aux noms de fonctions, pas aux numéros**) :
 
@@ -363,7 +399,7 @@ ou place-le dans la structure ci-dessus selon son rôle.
 ### Nommage des fichiers créés
 - **Scripts Python** : `NBFM_YYYYMMDD_HHMM.py` — jamais de numéro de version `V1_XX`
 - **Fichiers NBFM** : `meshtastic_[ShortName]_[YYYYMMDD]_[HHMMSS].NBFM`
-- **Profil flotte** : `profil_flotte_[YYYYMMDD]_[HHMMSS].NBFM`
+- **Profil flotte** : `profil_flotte_[YYYYMMDD]_[HHMMSS].NBFM` en FR, `fleet_profile_[YYYYMMDD]_[HHMMSS].NBFM` en EN (clé `fleet_filename`). Ce n'est qu'une **suggestion** dans la boîte d'enregistrement : les deux conventions sont équivalentes et l'utilisateur peut renommer librement. Ne JAMAIS déduire le type d'un fichier de son nom — utiliser `_profile_type == "fleet"`.
 - **Rapport HTML** : `NBFM_report_[YYYYMMDD_HHMMSS].html`
 
 ### Règle absolue — zéro régression
@@ -398,10 +434,42 @@ Avant toute modification d'une fonction existante :
 - `tr(key, **kwargs)` recharge la langue à chaque appel — pas de variable globale de langue
 - Ajout d'une clé UI = l'ajouter dans **les deux** dictionnaires `"fr"` et `"en"`
 - `_apply_lang()` met à jour **tous** les widgets sans détruire/recréer l'UI (sauf l'onglet Aide)
+- **Le cœur aussi est bilingue** : `tr()` est utilisable hors de `NBFMApp` (pas de dépendance tkinter, il
+  relit `NBFM_Config.json`). Tout message de log renvoyé par `_apply_section_to_node`,
+  `_apply_module_section`, `_apply_security_to_node` ou `import_full_config` finit dans un popup :
+  il doit passer par `tr()`, jamais par une f-string en dur.
+- **Depuis un thread**, ne jamais lire `self.lang_var` directement : mettre `UI_STRINGS[self.lang_var.get()]`
+  **à l'intérieur** du `lambda` passé à `root.after()` (voir `_do_import`).
+- Dans une f-string `f"""…"""` (bloc HTML du rapport), utiliser des guillemets **simples** dans les
+  accolades : `{T['report_col_type']}`. Les guillemets doubles imbriqués n'existent qu'à partir de Python 3.12.
+- Ce qui NE doit PAS être traduit : le contenu écrit dans les fichiers `.NBFM` (`_profile_note`), les
+  sentinelles internes (`tag` = `🚀FLOTTE`/`💾BACKUP`), les identifiants de colonnes Treeview, les noms
+  d'enums Meshtastic (`DISABLED`, `EU_868`, `CLIENT_MUTE`) et les noms de fichiers suggérés.
 
 ### Pas de tests automatisés
 - Aucun framework de test (pytest, unittest)
 - Validation manuelle sur matériel réel (T-Echo, ESP32 V3)
+
+### Vérification Python (Ruff) — obligatoire en fin de série
+- Quand tu as terminé **TOUTES** les modifications demandées sur un ou plusieurs fichiers Python,
+  lance **une seule fois** :
+  ```bash
+  python -m ruff check <fichier> --select E9,F63,F7,F82
+  ```
+  (fichier = le script actif, p. ex. `NBFM_V1.96.py` — voir « Script actif »)
+- Si Ruff signale des erreurs, corrige-les, puis relance la vérification jusqu'à obtenir
+  `All checks passed!`.
+- **Ne lance pas Ruff après chaque petite modification**, uniquement à la fin de la série.
+- **Ne modifie pas d'autres parties du code que celles demandées** — une remarque Ruff sur du code
+  hors périmètre se signale à l'utilisateur, elle ne se corrige pas d'office.
+- Ces règles ne couvrent que les erreurs bloquantes : `E9` (syntaxe / indentation), `F63` (comparaisons
+  invalides), `F7` (`break`/`return` hors contexte…), `F82` (nom indéfini). Elles ne remplacent ni
+  `py_compile` ni les smoke-tests headless — elles s'y ajoutent.
+- ⚠ **Un `ruff check` SANS `--select` renvoie ~151 remarques `BLE001` / `S110`** : c'est la convention
+  assumée du §7 « Gestion des erreurs » (broad `try/except Exception` partout, fallbacks jamais supprimés).
+  **Ne pas les corriger** — ce serait une régression au regard de la règle n°1. Les `# noqa` déjà en place
+  (`DTZ005` sur `_export_date`/`_profile_date`, `F401` sur l'import-sonde `ParseDict`) sont également
+  volontaires et commentés : ne pas les retirer.
 
 ---
 
@@ -443,7 +511,7 @@ Avant toute modification d'une fonction existante :
 
 ## 10. Roadmap / TODO
 
-> Tous les bugs (A, B, C, E–L) + la barre de progression + la validation PSK sont **faits** — voir
+> Tous les bugs (A, B, C, E–M) + la barre de progression + la validation PSK sont **faits** — voir
 > « Travaux récents » en tête. Ci-dessous, uniquement les pistes ouvertes (aucune urgente). La liste
 > priorisée pour rappel utilisateur est dans « ★ Pistes d'évolution proposées » en tête de fichier.
 

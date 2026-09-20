@@ -1,6 +1,6 @@
 # Nodes Backup & Fleet Manager — Notes de version / Release notes
 
-> Texte de version prêt à coller dans une **GitHub Release** — tag **V1.95**.
+> Texte de version prêt à coller dans une **GitHub Release** — tag **V1.96**.
 > Il décrit les **fonctions utiles à connaître** qui ne sont **pas encore détaillées**
 > sur la page des releases (https://github.com/zifnab69/Nodes-Backup-Fleet-Manager/releases).
 >
@@ -10,7 +10,29 @@
 
 ## 🇫🇷 Français
 
-### ✨ Nouveautés V1.95
+### ✨ Nouveautés V1.96
+
+- **Interface vraiment bilingue.** En mode anglais, certaines fenêtres restaient en français :
+  confirmation de restauration, création de profil flotte, avertissements d'intégrité, fin de
+  session multi-nœuds, message de dépendances manquantes… **Tous ces textes sont désormais
+  traduits.**
+- **Le compte rendu de restauration est traduit.** Le détail affiché à la fin d'un import
+  (canaux écrits, sections et modules appliqués, avertissements) suit maintenant la langue
+  choisie, alors qu'il était entièrement en français.
+- **Listes déroulantes traduites.** Les descriptions des **régions LoRa** et des **presets modem**
+  de l'éditeur s'affichent en anglais en mode anglais. Les codes officiels (`EU_868`, `LONG_FAST`…)
+  restent inchangés.
+- **Rapport HTML bilingue.** Le titre et les en-têtes de colonnes du rapport suivent la langue
+  (le rapport était jusqu'ici uniquement en anglais).
+- **Nom de fichier du profil flotte adapté à la langue** : `profil_flotte_…` en français,
+  `fleet_profile_…` en anglais. Les deux restent **totalement interchangeables** : vos fichiers
+  existants sont reconnus sans rien changer, quelle que soit la langue de l'interface.
+- **Correction — preset modem « VeryLongSlow ».** Dans l'éditeur, choisir *VeryLongSlow*
+  enregistrait en réalité *LongSlow*. C'est corrigé.
+  ⚠ Les fichiers `.NBFM` créés **avant** cette version avec *VeryLongSlow* contiennent la mauvaise
+  valeur : repassez dans l'éditeur si ce réglage comptait pour vous.
+
+### 🧩 Rappel des nouveautés V1.95
 
 - **Compatible petits écrans.** L'onglet principal dispose d'un **ascenseur global** : le bloc
   « Restaurer la configuration » et la barre d'état restent accessibles quelle que soit la hauteur
@@ -91,7 +113,28 @@
 
 ## 🇬🇧 English
 
-### ✨ What's new in V1.95
+### ✨ What's new in V1.96
+
+- **A genuinely bilingual interface.** In English mode, several dialogs were still showing French:
+  restore confirmation, fleet profile creation, integrity warnings, end of a multi-node session,
+  missing-dependency message… **All of these are now translated.**
+- **The restore report is translated.** The details shown at the end of an import (channels written,
+  sections and modules applied, warnings) now follow the selected language — it used to be entirely
+  in French.
+- **Translated drop-down lists.** The **LoRa region** and **modem preset** descriptions in the editor
+  now read in English when the app is in English. The official codes (`EU_868`, `LONG_FAST`…) are
+  unchanged.
+- **Bilingual HTML report.** The report title and column headers follow the selected language
+  (the report used to be English-only).
+- **Fleet profile file name follows the language**: `profil_flotte_…` in French,
+  `fleet_profile_…` in English. Both remain **fully interchangeable**: your existing files are
+  recognised as before, whatever the interface language.
+- **Fix — "VeryLongSlow" modem preset.** In the editor, picking *VeryLongSlow* actually saved
+  *LongSlow*. This is now fixed.
+  ⚠ `.NBFM` files created **before** this version with *VeryLongSlow* hold the wrong value —
+  reopen them in the editor if that setting mattered to you.
+
+### 🧩 Recap of V1.95
 
 - **Small-screen friendly.** The main tab now has a **global scrollbar**: the "Restore configuration"
   block and the status bar stay reachable whatever the window height (they used to be cut off at the

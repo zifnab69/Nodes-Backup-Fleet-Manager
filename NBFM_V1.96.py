@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Nodes Backup & Fleet Manager v1.95
-Version interne NBFM_20260812_1321
+Nodes Backup & Fleet Manager v1.96
+Version interne NBFM_20260920_1704
 Export/Import COMPLET + Profil Flotte (généralisation)
 # ============================================================
 # Nom du script : NODES-BACKUP-FLEET-MANAGER.py
@@ -28,12 +28,21 @@ Export/Import COMPLET + Profil Flotte (généralisation)
 # ============================================================
 """
 
+import contextlib
+import copy
+import io
+import json
+import os
+import re
+import shutil
+import sys
+import threading
+import time
 import tkinter as tk
-from tkinter import filedialog, messagebox, scrolledtext, ttk
-import os, sys, threading, json, shutil, copy, time, re, io, contextlib
-from pathlib import Path
-from typing import Optional, Dict, Any
 from datetime import datetime
+from pathlib import Path
+from tkinter import filedialog, messagebox, scrolledtext, ttk
+from typing import Any
 
 # Délai entre deux écritures admin successives lors d'une restauration.
 # Sur firmware récent + admin_key/PKI, la clé de session admin tourne à chaque
@@ -41,6 +50,15 @@ from datetime import datetime
 # périmée et est rejetée en silence (Bug G). Valeur alignée sur le CLI officiel
 # Meshtastic (--configure utilise time.sleep(0.5) entre chaque writeConfig).
 _ADMIN_WRITE_DELAY = 0.5
+
+
+class NBFMError(Exception):
+    """Erreur applicative NBFM (connexion série, lecture de config incomplète…).
+
+    Simple sous-classe d'`Exception` : tous les appelants font déjà
+    `except Exception`, le comportement est donc strictement identique — seul le
+    type est précisé, ce qui permet de distinguer nos erreurs de celles de la
+    lib Meshtastic si le besoin s'en présente (TRY002)."""
 
 
 class _ToolTip:
@@ -91,8 +109,8 @@ def check_dependencies():
             missing.append("meshtastic" if pkg == "meshtastic" else "pyserial")
     if missing:
         root = tk.Tk(); root.withdraw()
-        messagebox.showerror("Dépendances manquantes",
-            f"Installez:\n  pip install meshtastic pyserial\n\nManquant: {', '.join(missing)}")
+        messagebox.showerror(tr("deps_missing_title"),
+                             tr("deps_missing_text", missing=", ".join(missing)))
         sys.exit(1)
 
 
@@ -121,11 +139,11 @@ except Exception:
 # CONNEXION
 # ─────────────────────────────────────────────────────────────────────────────
 
-def connect_device(port: Optional[str] = None):
-    import meshtastic.serial_interface, time
+def connect_device(port: str | None = None):
+    import meshtastic.serial_interface
     ports_to_try = [port] if port else list_serial_ports()
     if not ports_to_try:
-        raise Exception(tr("conn_no_com"))
+        raise NBFMError(tr("conn_no_com"))
     last_error = None
     for p in ports_to_try:
         try:
@@ -138,11 +156,11 @@ def connect_device(port: Optional[str] = None):
             connected = ev.wait(8) if isinstance(ev, threading.Event) else bool(ev)
             if not connected:
                 iface.close()
-                raise Exception(tr("conn_timeout_on_port", port=p))
+                raise NBFMError(tr("conn_timeout_on_port", port=p))
             return iface
         except Exception as e:
             last_error = e
-    raise Exception(
+    raise NBFMError(
         tr("conn_failed_on_ports", ports=", ".join(ports_to_try), error=last_error)
     )
 
@@ -253,7 +271,8 @@ def _apply_security_to_node(local_node, section_data: dict) -> str:
     Restaure la section security via del[:] + append() — méthode CLI officielle.
     NE restaure PAS public_key / private_key (identité hardware unique de l'appareil).
     """
-    import base64, time
+    import base64
+    import time
     try:
         sec = local_node.localConfig.security
         msgs = []
@@ -273,7 +292,7 @@ def _apply_security_to_node(local_node, section_data: dict) -> str:
                 for kb in valid_keys:
                     sec.admin_key.append(kb)
                 local_node.writeConfig("security")
-                msgs.append(f"{len(valid_keys)} admin_key(s) restaurée(s)")
+                msgs.append(tr("log_sec_admin_keys", count=len(valid_keys)))
         for field in ["is_managed", "admin_channel_enabled", "serial_enabled", "debug_log_api_enabled"]:
             if field in section_data:
                 try:
@@ -285,19 +304,24 @@ def _apply_security_to_node(local_node, section_data: dict) -> str:
         if priv_b64:
             try:
                 sec.private_key = base64.b64decode(priv_b64)
-                msgs.append("private_key restaurée")
+                msgs.append(tr("log_sec_private_key_ok"))
             except Exception as e:
-                msgs.append(f"private_key échouée: {e}")
+                msgs.append(tr("log_sec_private_key_fail", error=e))
 
         local_node.writeConfig("security")
-        msgs.append("champs security écrits")
+        msgs.append(tr("log_sec_fields_written"))
         return "✓ [security] : " + ", ".join(msgs) if msgs else "✓ [security]"
     except Exception as e:
         return f"✗ [security] : {e}"
 
 
-def export_full_config(iface) -> Dict[str, Any]:
-    config = {"_export_date": datetime.now().isoformat(), "_app_version": "2.6"}
+def export_full_config(iface) -> dict[str, Any]:
+    # Heure locale NAÏVE volontaire : `_export_date` fait partie du format de
+    # fichier .NBFM (§5) et est relu tel quel par read_file_meta. Y ajouter un
+    # décalage horaire changerait le format des nouveaux fichiers — écarté au
+    # titre de la règle « zéro régression ». Idem pour `_profile_date`.
+    config = {"_export_date": datetime.now().isoformat(),  # noqa: DTZ005
+              "_app_version": "2.6"}
     local_node = getattr(iface, "localNode", None)
 
     for key, getter in [
@@ -444,7 +468,7 @@ def export_full_config(iface) -> Dict[str, Any]:
     try:
         lc = getattr(local_node, "localConfig", None) if local_node else None
         config["local_config"] = proto_to_dict(lc) if lc else {}
-        if not config["local_config"]: raise Exception("vide")
+        if not config["local_config"]: raise NBFMError("vide")   # sentinelle interne
     except Exception:
         config["local_config"] = {}
         for s in ["device","position","power","network","display","lora","bluetooth"]:
@@ -501,7 +525,7 @@ def build_fleet_profile(config: dict) -> dict:
         c.pop(key, None)
 
     c["_profile_type"] = "fleet"
-    c["_profile_date"] = datetime.now().isoformat()
+    c["_profile_date"] = datetime.now().isoformat()   # noqa: DTZ005 — voir export_full_config
     c["_profile_note"] = (
         "Profil flotte — clés uniques et données spécifiques "
         "à l'appareil source supprimés. admin_key conservée."
@@ -607,9 +631,9 @@ def _apply_section_to_node(local_node, section_name: str, section_data: dict) ->
         # Fallback sans ParseDict : writeConfig seul (valeurs non modifiées)
         try:
             local_node.writeConfig(section_name)
-            return f"✓ [{section_name}] (sans ParseDict)"
+            return tr("log_section_no_parsedict", section=section_name)
         except Exception as e:
-            return f"✗ [{section_name}]: {e}"
+            return tr("log_section_error", section=section_name, error=e)
 
     # security : traitement spécial (repeated bytes, pas de ParseDict)
     if section_name == "security":
@@ -617,7 +641,7 @@ def _apply_section_to_node(local_node, section_name: str, section_data: dict) ->
 
     proto_obj = getattr(local_node.localConfig, section_name, None)
     if proto_obj is None:
-        return f"⚠ [{section_name}] : section protobuf introuvable"
+        return tr("log_section_proto_missing", section=section_name)
 
     # Sauvegarder l'état actuel AVANT Clear() : si ParseDict échoue on restaure
     # plutôt que d'écrire un proto entièrement à zéros sur l'appareil.
@@ -637,7 +661,7 @@ def _apply_section_to_node(local_node, section_name: str, section_data: dict) ->
         data_to_parse = _coerce_repeated_fields(section_data, proto_obj)
         ParseDict(data_to_parse, proto_obj, ignore_unknown_fields=True)
         local_node.writeConfig(section_name)
-        return f"✓ [{section_name}]"
+        return tr("log_section_ok", section=section_name)
     except SystemExit:
         # writeConfig() a appelé our_exit() → sys.exit() (SystemExit, hors Exception).
         # Section présente dans le firmware mais inconnue de la lib Meshtastic.
@@ -647,7 +671,7 @@ def _apply_section_to_node(local_node, section_name: str, section_data: dict) ->
                 proto_obj.CopyFrom(saved)
             except Exception:
                 pass
-        return f"⚠ [{section_name}] non inscriptible via l'API Meshtastic (ignoré)"
+        return tr("log_section_not_writable", section=section_name)
     except Exception as e:
         # ParseDict a échoué après Clear() — restaurer l'état précédent
         # pour éviter d'écraser l'appareil avec un proto vide (tous les champs à 0)
@@ -658,11 +682,11 @@ def _apply_section_to_node(local_node, section_name: str, section_data: dict) ->
                 pass
         try:
             local_node.writeConfig(section_name)
-            return f"✓ [{section_name}] (fallback, ParseDict échoué: {e})"
+            return tr("log_section_fallback", section=section_name, error=e)
         except SystemExit:
-            return f"⚠ [{section_name}] non inscriptible via l'API Meshtastic (ignoré)"
+            return tr("log_section_not_writable", section=section_name)
         except Exception as e2:
-            return f"✗ [{section_name}]: {e2}"
+            return tr("log_section_error", section=section_name, error=e2)
 
 
 def _apply_module_section(local_node, section_name: str, section_data: dict) -> str:
@@ -672,7 +696,7 @@ def _apply_module_section(local_node, section_name: str, section_data: dict) -> 
     except ImportError:
         try:
             local_node.writeConfig(section_name)
-            return f"✓ module [{section_name}] (sans ParseDict)"
+            return tr("log_module_no_parsedict", section=section_name)
         except Exception:
             return None
 
@@ -694,7 +718,7 @@ def _apply_module_section(local_node, section_name: str, section_data: dict) -> 
         data_to_parse = _coerce_repeated_fields(section_data, proto_obj)
         ParseDict(data_to_parse, proto_obj, ignore_unknown_fields=True)
         _write_config_quiet(local_node, section_name)
-        return f"✓ module [{section_name}]"
+        return tr("log_module_ok", section=section_name)
     except SystemExit:
         # writeConfig() a appelé our_exit() → sys.exit() (lève SystemExit, qui
         # n'est PAS un Exception). Cas typique : un module présent dans le firmware
@@ -706,7 +730,7 @@ def _apply_module_section(local_node, section_name: str, section_data: dict) -> 
                 proto_obj.CopyFrom(saved)
             except Exception:
                 pass
-        return f"⚠ module [{section_name}] non inscriptible via l'API Meshtastic (ignoré)"
+        return tr("log_module_not_writable", section=section_name)
     except Exception:
         if saved is not None:
             try:
@@ -715,9 +739,9 @@ def _apply_module_section(local_node, section_name: str, section_data: dict) -> 
                 pass
         try:
             _write_config_quiet(local_node, section_name)
-            return f"✓ module [{section_name}] (fallback)"
+            return tr("log_module_fallback", section=section_name)
         except SystemExit:
-            return f"⚠ module [{section_name}] non inscriptible via l'API Meshtastic (ignoré)"
+            return tr("log_module_not_writable", section=section_name)
         except Exception:
             return None
 
@@ -846,7 +870,7 @@ def _psk_str_to_bytes(psk_str: str) -> bytes:
         return base64.b64decode(s)
 
 
-def import_full_config(iface, config: Dict[str, Any], progress=None) -> list:
+def import_full_config(iface, config: dict[str, Any], progress=None) -> list:
     """Restaure une config sur le nœud.
 
     `progress` (optionnel) : callback `progress(done, total, kind, detail="")`
@@ -899,11 +923,11 @@ def import_full_config(iface, config: Dict[str, Any], progress=None) -> list:
     try:
         local_node.beginSettingsTransaction()
         _tx_open = True
-        log.append("✓ Transaction de réglages ouverte")
+        log.append(tr("log_tx_opened"))
     except SystemExit:
-        log.append("⚠ beginSettingsTransaction indisponible — écritures directes")
+        log.append(tr("log_tx_begin_unavailable"))
     except Exception as e:
-        log.append(f"⚠ beginSettingsTransaction échouée ({e}) — écritures directes")
+        log.append(tr("log_tx_begin_failed", error=e))
 
     # ── Owner ──
     try:
@@ -918,16 +942,16 @@ def import_full_config(iface, config: Dict[str, Any], progress=None) -> list:
         if isinstance(sn, str) and len(sn) > 4:
             cleaned = re.sub(r'_[0-9A-Fa-f]{4}$', '', sn)
             if cleaned != sn:
-                log.append(f"ℹ Owner: suffixe MAC retiré du nom court ('{sn}' → '{cleaned}')")
+                log.append(tr("log_owner_mac_stripped", old=sn, new=cleaned))
                 sn = cleaned
         if ln or sn:
             local_node.setOwner(long_name=ln, short_name=sn)
-            log.append(f"✓ Owner: '{ln}' / '{sn}'")
+            log.append(tr("log_owner_set", long_name=ln, short_name=sn))
             time.sleep(_ADMIN_WRITE_DELAY)
         else:
-            log.append("– Owner: non modifié (profil flotte)")
+            log.append(tr("log_owner_unchanged"))
     except Exception as e:
-        log.append(f"✗ Owner: {e}")
+        log.append(tr("log_owner_error", error=e))
     _tick("owner")
 
     # ── Config locale — itère sur toutes les sections présentes dans le JSON ──
@@ -956,10 +980,12 @@ def import_full_config(iface, config: Dict[str, Any], progress=None) -> list:
 
     # ── Canaux — injection protobuf canal par canal ──────────────────────────
     try:
-        from google.protobuf.json_format import ParseDict
+        # ParseDict n'est pas utilisé ici : l'import sert de SONDE de
+        # disponibilité du stack protobuf, au même titre que channel_pb2.
+        from google.protobuf.json_format import ParseDict  # noqa: F401
         from meshtastic.protobuf import channel_pb2
     except ImportError as ie:
-        log.append(f"⚠ Import protobuf canaux impossible: {ie}")
+        log.append(tr("log_ch_proto_import_failed", error=ie))
         channel_pb2 = None
 
     channels_json = config.get("channels", None)
@@ -1019,7 +1045,7 @@ def import_full_config(iface, config: Dict[str, Any], progress=None) -> list:
                             psk_bytes = _psk_str_to_bytes(psk_hex)
                             ch_obj.settings.psk = psk_bytes
                         except Exception as e_psk:
-                            log.append(f"⚠ Canal {ch_index} PSK invalide: {e_psk}")
+                            log.append(tr("log_ch_psk_invalid", index=ch_index, error=e_psk))
                             # Garder PSK existante
                             existing = local_node.getChannelByChannelIndex(ch_index)
                             if existing:
@@ -1047,15 +1073,16 @@ def import_full_config(iface, config: Dict[str, Any], progress=None) -> list:
                         _clone.CopyFrom(ch_obj)
                         _ch_written[ch_index] = _clone
 
-                    psk_info = f"{len(ch_obj.settings.psk)}o" if ch_obj.settings.psk else "vide"
+                    psk_info = (tr("log_psk_bytes", n=len(ch_obj.settings.psk))
+                                if ch_obj.settings.psk else tr("log_psk_empty"))
                     status = "DISABLED" if role_val == 0 else f"'{ch_name}'"
-                    log.append(f"✓ Canal {ch_index} {status} PSK={psk_info}")
+                    log.append(tr("log_ch_written", index=ch_index, status=status, psk=psk_info))
 
                 else:
                     # Fallback sans channel_pb2 — méthode ancienne
                     existing = local_node.getChannelByChannelIndex(ch_index)
                     if existing is None:
-                        log.append(f"⚠ Canal {ch_index} introuvable")
+                        log.append(tr("log_ch_not_found", index=ch_index))
                         continue
                     existing.settings.name = ch_name
                     existing.role = role_val if role_val in (1, 2) else 0
@@ -1067,25 +1094,25 @@ def import_full_config(iface, config: Dict[str, Any], progress=None) -> list:
                             pass
                     local_node.channels[ch_index] = existing
                     local_node.writeChannel(ch_index)
-                    log.append(f"✓ Canal {ch_index} écrit (fallback)")
+                    log.append(tr("log_ch_written_fallback", index=ch_index))
 
             except Exception as e:
-                log.append(f"✗ Canal {ch_index}: {e}")
+                log.append(tr("log_ch_error", index=ch_index, error=e))
             time.sleep(_ADMIN_WRITE_DELAY)   # laisser la clé de session se rafraîchir (Bug G)
             _tick("channel", str(ch_index))
     else:
-        log.append("– Canaux: aucun canal dans le fichier")
+        log.append(tr("log_ch_none_in_file"))
 
     # ── Commit de la transaction : applique le lot d'écritures sur l'appareil ──
     if _tx_open:
         try:
             time.sleep(_ADMIN_WRITE_DELAY)
             local_node.commitSettingsTransaction()
-            log.append("✓ Transaction de réglages validée (commit)")
+            log.append(tr("log_tx_committed"))
         except SystemExit:
-            log.append("⚠ commitSettingsTransaction indisponible")
+            log.append(tr("log_tx_commit_unavailable"))
         except Exception as e:
-            log.append(f"⚠ commitSettingsTransaction échouée: {e}")
+            log.append(tr("log_tx_commit_failed", error=e))
     _tick("commit")
 
     # ── Vérification + relance ciblée des canaux (robustesse anti-rejet silencieux) ──
@@ -1111,15 +1138,14 @@ def import_full_config(iface, config: Dict[str, Any], progress=None) -> list:
             if not _reread_channels():
                 if saved_ch is not None:
                     local_node.channels = saved_ch      # ne pas laisser channels=None
-                log.append("ℹ Canaux écrits — vérification auto impossible (l'appareil "
-                           "redémarre après enregistrement). Vérifiez les canaux sur l'appareil.")
+                log.append(tr("log_ch_verify_skipped"))
             else:
                 missing = [ci for ci, want in _ch_written.items()
                            if not _channel_applied(local_node.getChannelByChannelIndex(ci), want)]
                 if not missing:
-                    log.append("✓ Canaux actifs confirmés sur l'appareil")
+                    log.append(tr("log_ch_confirmed"))
                 else:
-                    log.append(f"⚠ Canaux non appliqués {sorted(missing)} — relance directe…")
+                    log.append(tr("log_ch_not_applied", indexes=sorted(missing)))
                     for ci in missing:
                         try:
                             local_node.channels[ci] = _ch_written[ci]
@@ -1127,19 +1153,18 @@ def import_full_config(iface, config: Dict[str, Any], progress=None) -> list:
                             local_node.writeChannel(ci)
                             time.sleep(_ADMIN_WRITE_DELAY)
                         except Exception as e_rw:
-                            log.append(f"✗ Relance canal {ci} : {e_rw}")
+                            log.append(tr("log_ch_retry_error", index=ci, error=e_rw))
                     if _reread_channels():
                         still = [ci for ci in missing
                                  if not _channel_applied(local_node.getChannelByChannelIndex(ci), _ch_written[ci])]
                         if still:
-                            log.append(f"✗ Canaux toujours absents {sorted(still)} — "
-                                       "reset usine du nœud puis réimport conseillé")
+                            log.append(tr("log_ch_still_missing", indexes=sorted(still)))
                         else:
-                            log.append("✓ Canaux confirmés après relance")
+                            log.append(tr("log_ch_confirmed_retry"))
                     else:
-                        log.append("⚠ Re-vérification impossible après relance")
+                        log.append(tr("log_ch_recheck_failed"))
         except Exception as e:
-            log.append(f"⚠ Vérification canaux impossible ({e})")
+            log.append(tr("log_ch_verify_failed", error=e))
 
     return log
 
@@ -1218,13 +1243,67 @@ MODEM_PRESETS = {
     8: ("SHORT_TURBO",  "ShortTurbo  — courte portée, débit maximum"),
 }
 
+# Descriptions anglaises — mêmes clés que LORA_REGIONS / MODEM_PRESETS.
+# Ajoutées À CÔTÉ des tables FR (qui restent la source de vérité des codes et
+# de l'ordre) : seule la partie descriptive du libellé change selon la langue.
+LORA_REGIONS_EN = {
+    0:  "Unset",
+    1:  "United States 902-928 MHz",
+    2:  "Europe 433 MHz",
+    3:  "Europe 868 MHz ← France",
+    4:  "China 470-510 MHz",
+    5:  "Japan 920-928 MHz",
+    6:  "Australia/NZ 915-928 MHz",
+    7:  "Korea 920-923 MHz",
+    8:  "Taiwan 920-925 MHz",
+    9:  "Russia 868 MHz",
+    10: "India 865-867 MHz",
+    11: "New Zealand 865 MHz",
+    12: "Thailand 920-925 MHz",
+    13: "Worldwide 2.4 GHz",
+    14: "Ukraine 433 MHz",
+    15: "Ukraine 868 MHz",
+    16: "Malaysia 433 MHz",
+    17: "Malaysia 919 MHz",
+    18: "Singapore 923 MHz",
+}
+
+# Uniquement la partie située après le tiret dans MODEM_PRESETS (la seule affichée).
+MODEM_PRESETS_EN = {
+    0: "long range, moderate rate (default)",
+    1: "very long range, slow rate",
+    2: "max range, very slow rate",
+    3: "medium range, slow rate",
+    4: "medium range, fast rate",
+    5: "short range, slow rate",
+    6: "short range, fast rate",
+    7: "long range, moderate+ rate",
+    8: "short range, maximum rate",
+}
+
+
+def _region_desc(i) -> str:
+    """Description de la région dans la langue courante (repli : entrée 0)."""
+    if load_lang() == "en":
+        return LORA_REGIONS_EN.get(i, LORA_REGIONS_EN[0])
+    return LORA_REGIONS.get(i, LORA_REGIONS[0])[1]
+
+
+def _modem_desc(i) -> str:
+    """Description du preset modem dans la langue courante (repli : entrée 0)."""
+    if load_lang() == "en":
+        return MODEM_PRESETS_EN.get(i, MODEM_PRESETS_EN[0])
+    desc = MODEM_PRESETS.get(i, MODEM_PRESETS[0])[1]
+    return desc.split("— ", 1)[-1].strip()
+
+
 # Helpers de conversion int <-> label combobox
 def _region_labels():
-    return [f"{v} — {k}  [{i}]" for i, (v, k) in LORA_REGIONS.items()]
+    return [f"{v} — {_region_desc(i)}  [{i}]" for i, (v, k) in LORA_REGIONS.items()]
 
 def _modem_labels():
-    return [f"{code}    — {desc.split('— ', 1)[-1].strip()}"
-            for code, desc in MODEM_PRESETS.values()]
+    return [f"{code}    — {_modem_desc(i)}"
+            for i, (code, desc) in MODEM_PRESETS.items()]
 
 def _region_int_from_label(label: str) -> int:
     """Extrait l'entier depuis un label de la combobox région."""
@@ -1234,8 +1313,26 @@ def _region_int_from_label(label: str) -> int:
         return 0
 
 def _modem_int_from_label(label: str) -> int:
-    """Retrouve l'index du preset depuis son label."""
+    """Retrouve l'index du preset depuis son label (Bug M).
+
+    `_modem_labels()` construit le libellé sous la forme ``"<CODE>    — <desc>"`` :
+    le code est donc le PREMIER token. On le compare EXACTEMENT.
+
+    L'ancien test `code in label` faisait un match en sous-chaîne, en parcourant
+    les presets dans l'ordre 0→8 : pour ``VERY_LONG_SLOW    — …``, le code
+    ``LONG_SLOW`` (index 1) matchait AVANT l'index 2. Choisir « VeryLongSlow »
+    dans l'éditeur enregistrait donc `modem_preset = 1` (LongSlow).
+
+    Le repli en sous-chaîne est CONSERVÉ pour tout libellé d'une autre
+    provenance (ancien fichier, libellé tronqué…), mais les codes y sont testés
+    du plus long au plus court pour que VERY_LONG_SLOW passe avant LONG_SLOW.
+    """
+    head = label.split(" ", 1)[0].strip() if label else ""
     for i, (code, desc) in MODEM_PRESETS.items():
+        if code == head:
+            return i
+    # Repli : ancien comportement (sous-chaîne), codes les plus longs d'abord.
+    for i, (code, desc) in sorted(MODEM_PRESETS.items(), key=lambda kv: -len(kv[1][0])):
         if code in label:
             return i
     return 0
@@ -1243,8 +1340,8 @@ def _modem_int_from_label(label: str) -> int:
 def _region_label_from_int(val) -> str:
     try:
         i = int(val)
-        v, k = LORA_REGIONS.get(i, ("UNSET", "Non défini"))
-        return f"{v} — {k}  [{i}]"
+        v, _k = LORA_REGIONS.get(i, LORA_REGIONS[0])
+        return f"{v} — {_region_desc(i)}  [{i}]"
     except (ValueError, TypeError):
         pass
     # Nom d'enum string (ex: "EU_868" selon certaines versions protobuf)
@@ -1252,14 +1349,14 @@ def _region_label_from_int(val) -> str:
         val_up = val.upper()
         for i, (v, k) in LORA_REGIONS.items():
             if v.upper() == val_up:
-                return f"{v} — {k}  [{i}]"
+                return f"{v} — {_region_desc(i)}  [{i}]"
     return _region_labels()[0]
 
 def _modem_label_from_int(val) -> str:
     try:
         i = int(val)
-        code, desc = MODEM_PRESETS.get(i, ("LONG_FAST", "LongFast    — longue portée, débit modéré (défaut)"))
-        return f"{code}    — {desc.split('— ', 1)[-1].strip()}"
+        code, _desc = MODEM_PRESETS.get(i, MODEM_PRESETS[0])
+        return f"{code}    — {_modem_desc(i)}"
     except (ValueError, TypeError):
         pass
     # Nom d'enum string (ex: "LONG_FAST" selon certaines versions protobuf)
@@ -1267,7 +1364,7 @@ def _modem_label_from_int(val) -> str:
         val_up = val.upper()
         for i, (code, desc) in MODEM_PRESETS.items():
             if code.upper() == val_up:
-                return f"{code}    — {desc.split('— ', 1)[-1].strip()}"
+                return f"{code}    — {_modem_desc(i)}"
     return _modem_labels()[0]
 
 
@@ -1743,6 +1840,7 @@ UI_STRINGS = {
         "sel_choose_backup_folder": "Dossier de sauvegarde",
         "sel_save_full_config": "Sauvegarder la config complète",
         "sel_save_fleet_profile": "Enregistrer le profil flotte",
+        "fleet_filename":           "profil_flotte_{date}.NBFM",
         "sel_choose_config_file": "Choisir un fichier de config",
         "sel_copy_file": "Copier le fichier",
         "sel_save_node": "Sauvegarder nœud #{index} — {name}",
@@ -1804,7 +1902,7 @@ UI_STRINGS = {
         "view_save_confirm_text": "Écraser {filename} avec le contenu édité ?\nUne copie horodatée est d'abord placée dans Backup/.",
         "popup_copy_error_title": "Erreur copie",
         "deps_missing_title": "Dépendances manquantes",
-        "deps_missing_text": "Installez: pip install meshtastic pyserial Manquant: {missing}",
+        "deps_missing_text": "Installez:\n  pip install meshtastic pyserial\n\nManquant: {missing}",
         "conn_no_com": "Aucun port COM détecté.\nVérifiez:\n  - Câble USB data branché\n  - Drivers CP210x / CH340 installés\n  - Appareil allumé",
         "conn_timeout_on_port": "Timeout sur {port}",
         "conn_failed_on_ports": "Impossible de connecter sur: {ports}\nErreur: {error}\nVérifiez le câble USB data et les drivers.",
@@ -1851,6 +1949,74 @@ UI_STRINGS = {
         "popup_session_done_title": "Session terminée",
         "popup_multi_import_done_text": "{count} nœud(s) restauré(s) avec succès.\n{errors} erreur(s).\n\n⚠ Redémarrez chaque appareil pour appliquer.",
         "popup_node_restored_text": "{log_text}\n⚠ Redémarrez l'appareil pour appliquer.",
+
+        # ── Libellés de type / listes (UI) ────────────────────────────────
+        "type_fleet":               "🚀 Flotte",
+        "type_backup":              "💾 Backup",
+        "group_other":              "— Autres —",
+        "com1_excluded_note":       " (COM1 exclu)",
+        "filetype_all":             "Tous",
+        "restore_type_fleet":       "⚡ PROFIL FLOTTE",
+        "restore_type_full":        "📦 Sauvegarde complète",
+        "restore_date_unknown":     "inconnue",
+        "restore_source_unset":     "Non défini (profil flotte)",
+        "log_header_import":        "Config restaurée : {filename}",
+        "log_header_node":          "Nœud #{index} — {filename}",
+        "warn_restart_device":      "⚠ Redémarrez l'appareil pour appliquer.",
+        # ── Rapport HTML ──────────────────────────────────────────────────
+        "report_no_files":          "Aucun fichier NBFM trouvé.",
+        "report_html_title":        "Rapport NBFM",
+        "report_generated":         "Généré : {date}",
+        "report_file_count":        "{count} fichier(s)",
+        "report_col_name":          "Nom long",
+        "report_col_region":        "Région",
+        "report_col_ch2":           "Canal 2",
+        "report_col_nodes":         "Nœuds connus",
+        # ── Journal d'import (section security) ───────────────────────────
+        "log_sec_admin_keys":       "{count} admin_key(s) restaurée(s)",
+        "log_sec_private_key_ok":   "private_key restaurée",
+        "log_sec_private_key_fail": "private_key échouée: {error}",
+        "log_sec_fields_written":   "champs security écrits",
+        # ── Journal d'import (sections locales) ───────────────────────────
+        "log_section_ok":           "✓ [{section}]",
+        "log_section_no_parsedict": "✓ [{section}] (sans ParseDict)",
+        "log_section_error":        "✗ [{section}]: {error}",
+        "log_section_proto_missing":"⚠ [{section}] : section protobuf introuvable",
+        "log_section_not_writable": "⚠ [{section}] non inscriptible via l'API Meshtastic (ignoré)",
+        "log_section_fallback":     "✓ [{section}] (fallback, ParseDict échoué: {error})",
+        # ── Journal d'import (modules) ────────────────────────────────────
+        "log_module_ok":            "✓ module [{section}]",
+        "log_module_no_parsedict":  "✓ module [{section}] (sans ParseDict)",
+        "log_module_not_writable":  "⚠ module [{section}] non inscriptible via l'API Meshtastic (ignoré)",
+        "log_module_fallback":      "✓ module [{section}] (fallback)",
+        # ── Journal d'import (transaction, owner, canaux) ─────────────────
+        "log_tx_opened":            "✓ Transaction de réglages ouverte",
+        "log_tx_begin_unavailable": "⚠ beginSettingsTransaction indisponible — écritures directes",
+        "log_tx_begin_failed":      "⚠ beginSettingsTransaction échouée ({error}) — écritures directes",
+        "log_owner_mac_stripped":   "ℹ Owner: suffixe MAC retiré du nom court ('{old}' → '{new}')",
+        "log_owner_set":            "✓ Owner: '{long_name}' / '{short_name}'",
+        "log_owner_unchanged":      "– Owner: non modifié (profil flotte)",
+        "log_owner_error":          "✗ Owner: {error}",
+        "log_ch_proto_import_failed":"⚠ Import protobuf canaux impossible: {error}",
+        "log_ch_psk_invalid":       "⚠ Canal {index} PSK invalide: {error}",
+        "log_psk_empty":            "vide",
+        "log_psk_bytes":            "{n}o",
+        "log_ch_written":           "✓ Canal {index} {status} PSK={psk}",
+        "log_ch_not_found":         "⚠ Canal {index} introuvable",
+        "log_ch_written_fallback":  "✓ Canal {index} écrit (fallback)",
+        "log_ch_error":             "✗ Canal {index}: {error}",
+        "log_ch_none_in_file":      "– Canaux: aucun canal dans le fichier",
+        "log_tx_committed":         "✓ Transaction de réglages validée (commit)",
+        "log_tx_commit_unavailable":"⚠ commitSettingsTransaction indisponible",
+        "log_tx_commit_failed":     "⚠ commitSettingsTransaction échouée: {error}",
+        "log_ch_verify_skipped":    "ℹ Canaux écrits — vérification auto impossible (l'appareil redémarre après enregistrement). Vérifiez les canaux sur l'appareil.",
+        "log_ch_confirmed":         "✓ Canaux actifs confirmés sur l'appareil",
+        "log_ch_not_applied":       "⚠ Canaux non appliqués {indexes} — relance directe…",
+        "log_ch_retry_error":       "✗ Relance canal {index} : {error}",
+        "log_ch_still_missing":     "✗ Canaux toujours absents {indexes} — reset usine du nœud puis réimport conseillé",
+        "log_ch_confirmed_retry":   "✓ Canaux confirmés après relance",
+        "log_ch_recheck_failed":    "⚠ Re-vérification impossible après relance",
+        "log_ch_verify_failed":     "⚠ Vérification canaux impossible ({error})",
 
     },
     "en": {
@@ -2091,6 +2257,7 @@ UI_STRINGS = {
         "sel_choose_backup_folder": "Backup folder",
         "sel_save_full_config": "Save full configuration",
         "sel_save_fleet_profile": "Save fleet profile",
+        "fleet_filename":           "fleet_profile_{date}.NBFM",
         "sel_choose_config_file": "Choose a configuration file",
         "sel_copy_file": "Copy file",
         "sel_save_node": "Save node #{index} — {name}",
@@ -2152,7 +2319,7 @@ UI_STRINGS = {
         "view_save_confirm_text": "Overwrite {filename} with the edited content?\nA timestamped copy is placed in Backup/ first.",
         "popup_copy_error_title": "Copy error",
         "deps_missing_title": "Missing dependencies",
-        "deps_missing_text": "Install:\npip install meshtastic pyserial\n\nMissing: {missing}",
+        "deps_missing_text": "Install:\n  pip install meshtastic pyserial\n\nMissing: {missing}",
         "conn_no_com": "No COM port detected.\n\nCheck:\n  - USB data cable connected\n  - CP210x / CH340 drivers installed\n  - Device powered on",
         "conn_timeout_on_port": "Timeout on {port}",
         "conn_failed_on_ports": "Unable to connect on: {ports}\n\nError: {error}\n\nCheck the USB data cable and drivers.",
@@ -2197,6 +2364,74 @@ UI_STRINGS = {
         "popup_multi_import_done_text": "{count} node(s) restored successfully.\n{errors} error(s).\n\n⚠ Restart each device to apply changes.",
         "popup_node_restored_text": "{log_text}\n\n⚠ Restart the device to apply changes.",
 
+        # ── Type labels / lists (UI) ──────────────────────────────────────
+        "type_fleet":               "🚀 Fleet",
+        "type_backup":              "💾 Backup",
+        "group_other":              "— Other —",
+        "com1_excluded_note":       " (COM1 excluded)",
+        "filetype_all":             "All",
+        "restore_type_fleet":       "⚡ FLEET PROFILE",
+        "restore_type_full":        "📦 Full backup",
+        "restore_date_unknown":     "unknown",
+        "restore_source_unset":     "Not set (fleet profile)",
+        "log_header_import":        "Configuration restored: {filename}",
+        "log_header_node":          "Node #{index} — {filename}",
+        "warn_restart_device":      "⚠ Restart the device to apply changes.",
+        # ── HTML report ───────────────────────────────────────────────────
+        "report_no_files":          "No NBFM file found.",
+        "report_html_title":        "NBFM Report",
+        "report_generated":         "Generated: {date}",
+        "report_file_count":        "{count} file(s)",
+        "report_col_name":          "Long name",
+        "report_col_region":        "Region",
+        "report_col_ch2":           "Channel 2",
+        "report_col_nodes":         "Known nodes",
+        # ── Import log (security section) ─────────────────────────────────
+        "log_sec_admin_keys":       "{count} admin_key(s) restored",
+        "log_sec_private_key_ok":   "private_key restored",
+        "log_sec_private_key_fail": "private_key failed: {error}",
+        "log_sec_fields_written":   "security fields written",
+        # ── Import log (local sections) ───────────────────────────────────
+        "log_section_ok":           "✓ [{section}]",
+        "log_section_no_parsedict": "✓ [{section}] (without ParseDict)",
+        "log_section_error":        "✗ [{section}]: {error}",
+        "log_section_proto_missing":"⚠ [{section}] : protobuf section not found",
+        "log_section_not_writable": "⚠ [{section}] not writable through the Meshtastic API (skipped)",
+        "log_section_fallback":     "✓ [{section}] (fallback, ParseDict failed: {error})",
+        # ── Import log (modules) ──────────────────────────────────────────
+        "log_module_ok":            "✓ module [{section}]",
+        "log_module_no_parsedict":  "✓ module [{section}] (without ParseDict)",
+        "log_module_not_writable":  "⚠ module [{section}] not writable through the Meshtastic API (skipped)",
+        "log_module_fallback":      "✓ module [{section}] (fallback)",
+        # ── Import log (transaction, owner, channels) ─────────────────────
+        "log_tx_opened":            "✓ Settings transaction opened",
+        "log_tx_begin_unavailable": "⚠ beginSettingsTransaction unavailable — direct writes",
+        "log_tx_begin_failed":      "⚠ beginSettingsTransaction failed ({error}) — direct writes",
+        "log_owner_mac_stripped":   "ℹ Owner: MAC suffix removed from short name ('{old}' → '{new}')",
+        "log_owner_set":            "✓ Owner: '{long_name}' / '{short_name}'",
+        "log_owner_unchanged":      "– Owner: unchanged (fleet profile)",
+        "log_owner_error":          "✗ Owner: {error}",
+        "log_ch_proto_import_failed":"⚠ Channel protobuf import failed: {error}",
+        "log_ch_psk_invalid":       "⚠ Channel {index} invalid PSK: {error}",
+        "log_psk_empty":            "empty",
+        "log_psk_bytes":            "{n} bytes",
+        "log_ch_written":           "✓ Channel {index} {status} PSK={psk}",
+        "log_ch_not_found":         "⚠ Channel {index} not found",
+        "log_ch_written_fallback":  "✓ Channel {index} written (fallback)",
+        "log_ch_error":             "✗ Channel {index}: {error}",
+        "log_ch_none_in_file":      "– Channels: no channel in the file",
+        "log_tx_committed":         "✓ Settings transaction committed",
+        "log_tx_commit_unavailable":"⚠ commitSettingsTransaction unavailable",
+        "log_tx_commit_failed":     "⚠ commitSettingsTransaction failed: {error}",
+        "log_ch_verify_skipped":    "ℹ Channels written — automatic check not possible (the device reboots after saving). Please check the channels on the device.",
+        "log_ch_confirmed":         "✓ Active channels confirmed on the device",
+        "log_ch_not_applied":       "⚠ Channels not applied {indexes} — direct retry…",
+        "log_ch_retry_error":       "✗ Channel {index} retry: {error}",
+        "log_ch_still_missing":     "✗ Channels still missing {indexes} — factory reset of the node then re-import advised",
+        "log_ch_confirmed_retry":   "✓ Channels confirmed after retry",
+        "log_ch_recheck_failed":    "⚠ Re-check not possible after retry",
+        "log_ch_verify_failed":     "⚠ Channel check not possible ({error})",
+
     },
 }
 
@@ -2209,7 +2444,7 @@ def tr(key: str, **kwargs) -> str:
 class NBFMApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Nodes Backup & Fleet Manager v1.95")
+        self.root.title("Nodes Backup & Fleet Manager v1.96")
         # Taille Fenetre principale — bornée à l'écran (petits écrans / 768 px de haut)
         self._fit_to_screen(self.root, 1220, 840)
         self.root.resizable(True, True)
@@ -2309,7 +2544,7 @@ class NBFMApp:
         # ── En-tête global ────────────────────────────────────────────────────
         hdr = ttk.Frame(root)
         hdr.pack(fill="x", pady=(12, 2), padx=20)
-        ttk.Label(hdr, text="Nodes Backup & Fleet Manager v1.95",
+        ttk.Label(hdr, text="Nodes Backup & Fleet Manager v1.96",
                   font=("Arial", 15, "bold")).pack(side="left")
         # Sélecteur de langue FR / EN
         lang_frame = ttk.Frame(hdr)
@@ -2542,7 +2777,7 @@ class NBFMApp:
         self._lbl_export_hint.config(text=T["lbl_export_hint"])
         # Fichiers - en-têtes colonnes (sans flèche de tri)
         for cid, tkey in self._tree_col_keys:
-            cur = self.tree.heading(cid)["text"].rstrip(" ▲▼")
+            # réécrire l'en-tête suffit à retirer la flèche de tri éventuelle
             self.tree.heading(cid, text=T[tkey])
         self._lf_files.config(text=T["lf_files"])
         self._btn_refresh.config(text=T["btn_refresh"])
@@ -2625,7 +2860,7 @@ class NBFMApp:
                     step(val[0], val[1])
 
         ttk.Separator(inner, orient="horizontal").pack(fill="x", pady=(10, 4))
-        ttk.Label(inner, text="Nodes Backup & Fleet Manager v1.95",
+        ttk.Label(inner, text="Nodes Backup & Fleet Manager v1.96",
                   font=("Arial", 8), foreground="#aaa").pack(anchor="e", padx=8, pady=4)
 
 
@@ -2643,7 +2878,8 @@ class NBFMApp:
         self.port_combo["values"] = ports
         if ports:
             self.port_combo.set(ports[0])
-            excluded_note = f" (COM1 exclu)" if len(all_ports) != len(ports) else ""
+            excluded_note = (UI_STRINGS[self.lang_var.get()]["com1_excluded_note"]
+                             if len(all_ports) != len(ports) else "")
             self.set_status(
                 UI_STRINGS[self.lang_var.get()]["status_ports_found"].format(
                     count=len(ports), ports=", ".join(ports), excluded_note=excluded_note
@@ -2725,18 +2961,18 @@ class NBFMApp:
                 first_meta = items[0][1]
                 node_name = first_meta.get("long_name", "?")
                 if mac == "__other__":
-                    grp_text = ("", "— Autres / Other —", "", "", "", "", "", "", "")
+                    grp_text = ("", T["group_other"], "", "", "", "", "", "", "")
                 else:
                     grp_text = ("", T["group_node"].format(
                         name=node_name, mac=mac, count=len(items)
                     ), "", "", "", "", "", "", "")
-                grp_iid = self.tree.insert("", "end", values=grp_text,
-                                           tags=("group_header",))
+                self.tree.insert("", "end", values=grp_text,
+                                 tags=("group_header",))
                 # Enfants (fichiers)
                 for row_idx, (p, meta) in enumerate(items):
                     tag_base = "fleet" if meta["tag"].startswith("🚀") else "backup"
                     tag = tag_base + ("_odd" if row_idx % 2 == 1 else "")
-                    type_label = "🚀 Flotte" if tag_base == "fleet" else "💾 Backup"
+                    type_label = T["type_fleet"] if tag_base == "fleet" else T["type_backup"]
                     note_flag = " 📝" if p.name in self._notes else ""
                     iid = self.tree.insert("", "end",
                         values=(type_label, p.name + note_flag,
@@ -2930,18 +3166,18 @@ class NBFMApp:
     def export_report(self):
         T = UI_STRINGS[self.lang_var.get()]
         paths = sorted(
-            list(self.work_dir.glob("*.NBFM")),
+            self.work_dir.glob("*.NBFM"),
             key=lambda p: p.stat().st_mtime, reverse=True
         )
         if not paths:
-            messagebox.showinfo(T["btn_report"], "Aucun fichier NBFM trouvé / No NBFM file found.")
+            messagebox.showinfo(T["btn_report"], T["report_no_files"])
             return
         notes = load_notes(self.work_dir)
         rows_html = ""
         for p in paths:
             meta = read_file_meta(p)
             tag   = meta["tag"]
-            tl    = "🚀 Fleet" if "FLOTTE" in tag else "💾 Backup"
+            tl    = T["type_fleet"] if "FLOTTE" in tag else T["type_backup"]
             note  = notes.get(p.name, "")
             nc    = meta.get("known_nodes_count", 0)
             rows_html += f"""
@@ -2960,11 +3196,11 @@ class NBFMApp:
               <td>{meta['date']}</td>
               <td class="note">{note}</td>
             </tr>"""
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+        now_str = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M")
         html = f"""<!DOCTYPE html>
-<html lang="fr">
+<html lang="{self.lang_var.get()}">
 <head><meta charset="UTF-8">
-<title>NBFM Report — {self.work_dir.name}</title>
+<title>{T['report_html_title']} — {self.work_dir.name}</title>
 <style>
   body  {{ font-family: Arial, sans-serif; font-size: 13px; margin: 24px; }}
   h1    {{ color: #003366; }}
@@ -2980,20 +3216,20 @@ class NBFMApp:
 </style>
 </head>
 <body>
-<h1>📊 NBFM Report — {self.work_dir.name}</h1>
-<p>Generated: {now_str} &nbsp;|&nbsp; {len(paths)} file(s)</p>
+<h1>📊 {T['report_html_title']} — {self.work_dir.name}</h1>
+<p>{T['report_generated'].format(date=now_str)} &nbsp;|&nbsp; {T['report_file_count'].format(count=len(paths))}</p>
 <table>
   <tr>
-    <th>Type</th><th>File</th><th>Long name</th><th>Model</th>
-    <th>Region</th><th>Modem</th><th>Frequency</th>
-    <th>Ch 0</th><th>Ch 1</th><th>Ch 2</th>
-    <th>Known nodes</th><th>Date</th><th>Note</th>
+    <th>{T['report_col_type']}</th><th>{T['report_col_file']}</th><th>{T['report_col_name']}</th><th>{T['report_col_model']}</th>
+    <th>{T['report_col_region']}</th><th>{T['report_col_modem']}</th><th>{T['report_col_freq']}</th>
+    <th>{T['report_col_ch0']}</th><th>{T['report_col_ch1']}</th><th>{T['report_col_ch2']}</th>
+    <th>{T['report_col_nodes']}</th><th>{T['report_col_date']}</th><th>{T['report_col_note']}</th>
   </tr>
   {rows_html}
 </table>
-<div class="footer">Nodes Backup &amp; Fleet Manager — NBFM Report</div>
+<div class="footer">Nodes Backup &amp; Fleet Manager — {T['report_html_title']}</div>
 </body></html>"""
-        now_file = datetime.now().strftime("%Y%m%d_%H%M%S")
+        now_file = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
         dest = self.work_dir / f"NBFM_report_{now_file}.html"
         try:
             dest.write_text(html, encoding="utf-8")
@@ -3005,7 +3241,7 @@ class NBFMApp:
         except Exception as e:
             messagebox.showerror(T["btn_report"], str(e))
 
-    def _get_selected_file(self) -> Optional[Path]:
+    def _get_selected_file(self) -> Path | None:
         sel = self.tree.selection()
         if not sel:
             T = UI_STRINGS[self.lang_var.get()]
@@ -3027,7 +3263,7 @@ class NBFMApp:
 
                 # Nom de fichier : short_name réel + suffixe MAC (ex: MC_1680)
                 # Le suffixe vient de my_info.my_node_num, PAS du champ owner.
-                now      = datetime.now().strftime("%Y%m%d_%H%M%S")
+                now      = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
                 owner    = config.get("owner", {}) if isinstance(config.get("owner"), dict) else {}
                 sn_raw   = (owner.get("short_name", "") or owner.get("long_name", "")).split("_")[0]
                 mac4     = _node_mac4((config.get("my_info") or {}).get("my_node_num"))
@@ -3041,7 +3277,7 @@ class NBFMApp:
                         initialdir=str(self.work_dir),
                         defaultextension=".NBFM",
                         initialfile=suggest,
-                        filetypes=[("NBFM files", "*.NBFM"), ("Tous", "*.*")]
+                        filetypes=[("NBFM files", "*.NBFM"), (UI_STRINGS[self.lang_var.get()]["filetype_all"], "*.*")]
                     )
                     if not filename:
                         self.set_status(UI_STRINGS[self.lang_var.get()]["status_export_cancelled"])
@@ -3054,8 +3290,9 @@ class NBFMApp:
                         self.dir_var.set(str(self.work_dir))
                         self.refresh_files()
                         self.set_status(f"✓ {Path(filename).name}")
-                        messagebox.showinfo("Export réussi ✓",
-                            f"Config complète sauvegardée :\n{filename}")
+                        _T = UI_STRINGS[self.lang_var.get()]
+                        messagebox.showinfo(_T["popup_export_success_title"],
+                            _T["popup_export_success_text"].format(filename=filename))
                     except Exception as e:
                         messagebox.showerror(UI_STRINGS[self.lang_var.get()]["popup_save_error_title"], str(e))
 
@@ -3085,17 +3322,18 @@ class NBFMApp:
             messagebox.showerror(UI_STRINGS[self.lang_var.get()]["popup_invalid_file"], str(e)); return
 
         if config.get("_profile_type") == "fleet":
-            if not messagebox.askyesno("Déjà un profil flotte",
-                "Ce fichier est déjà un profil flotte.\n\nContinuer quand même ?"):
+            _T = UI_STRINGS[self.lang_var.get()]
+            if not messagebox.askyesno(_T["popup_fleet_exists_title"],
+                                       _T["popup_fleet_exists_text"]):
                 return
 
-        now = datetime.now().strftime("%Y%m%d_%H%M%S")
+        now = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
         dest = filedialog.asksaveasfilename(
             title=UI_STRINGS[self.lang_var.get()]["sel_save_fleet_profile"],
             initialdir=str(self.work_dir),
             defaultextension=".NBFM",
-            initialfile=f"profil_flotte_{now}.NBFM",
-            filetypes=[("NBFM files", "*.NBFM"), ("Tous", "*.*")]
+            initialfile=UI_STRINGS[self.lang_var.get()]["fleet_filename"].format(date=now),
+            filetypes=[("NBFM files", "*.NBFM"), (UI_STRINGS[self.lang_var.get()]["filetype_all"], "*.*")]
         )
         if not dest: return
 
@@ -3108,23 +3346,9 @@ class NBFMApp:
             self.dir_var.set(str(self.work_dir))
             self.refresh_files()
             self.set_status(UI_STRINGS[self.lang_var.get()]["status_fleet_created"].format(filename=Path(dest).name))
-            messagebox.showinfo("Profil flotte créé ✓",
-                f"Fichier créé:\n{dest}\n\n"
-                "Éléments supprimés (uniques à l'appareil source):\n"
-                "  ✗ my_info (ID, device_id, firmware)\n"
-                "  ✗ metadata\n"
-                "  ✗ owner (nom de l'appareil)\n"
-                "  ✗ known_nodes (nœuds du mesh)\n"
-                "  ✗ security.public_key + private_key\n"
-                "  ✗ network.wifi_ssid + wifi_psk\n"
-                "  ✗ Compteurs version internes\n\n"
-                "Éléments conservés (applicables à la flotte):\n"
-                "  ✓ security.admin_key\n"
-                "  ✓ Config LoRa (LONG_FAST, fréquence, région…)\n"
-                "  ✓ Canaux (HellDogs, BackHell avec PSK)\n"
-                "  ✓ Config Bluetooth, display, position, power\n"
-                "  ✓ Tous les modules"
-            )
+            _T = UI_STRINGS[self.lang_var.get()]
+            messagebox.showinfo(_T["popup_fleet_created_title"],
+                                _T["popup_fleet_created_text"].format(dest=dest))
         except Exception as e:
             messagebox.showerror(UI_STRINGS[self.lang_var.get()]["popup_error_title"], str(e))
 
@@ -3222,24 +3446,22 @@ class NBFMApp:
         if integrity_warns:
             warn_text = "\n".join(integrity_warns)
             if not messagebox.askyesno(
-                "⚠ Avertissements d'intégrité",
-                f"Le fichier présente les problèmes suivants :\n\n{warn_text}\n\n"
-                "Continuer quand même la restauration ?"
+                UI_STRINGS[self.lang_var.get()]["popup_integrity_title"],
+                UI_STRINGS[self.lang_var.get()]["popup_integrity_restore_text"].format(warns=warn_text)
             ):
                 return
 
+        T = UI_STRINGS[self.lang_var.get()]
         profile_type = config.get("_profile_type", "complet")
-        export_date  = config.get("_export_date", config.get("_profile_date", "inconnue"))
+        export_date  = config.get("_export_date", config.get("_profile_date", T["restore_date_unknown"]))
         owner = config.get("owner", {})
-        ln = owner.get("long_name", "Non défini (profil flotte)") if isinstance(owner, dict) else "?"
-        type_label = "⚡ PROFIL FLOTTE" if profile_type == "fleet" else "📦 Sauvegarde complète"
+        ln = owner.get("long_name", T["restore_source_unset"]) if isinstance(owner, dict) else "?"
+        type_label = T["restore_type_fleet"] if profile_type == "fleet" else T["restore_type_full"]
 
-        if not messagebox.askyesno("Confirmer la restauration",
-            f"Fichier : {file_path.name}\n"
-            f"Type    : {type_label}\n"
-            f"Date    : {export_date}\n"
-            f"Source  : {ln}\n\n"
-            "⚠ Écrase la config actuelle de l'appareil.\n\nContinuer ?"):
+        if not messagebox.askyesno(T["popup_restore_confirm_title"],
+            T["popup_restore_confirm_text"].format(
+                filename=file_path.name, type_label=type_label,
+                export_date=export_date, source=ln)):
             return
 
         self.set_status(UI_STRINGS[self.lang_var.get()]["status_restoring_file"].format(filename=file_path.name))
@@ -3254,10 +3476,10 @@ class NBFMApp:
                 log_text = "\n".join(log_lines)
                 self.root.after(0, lambda: self.set_status(UI_STRINGS[self.lang_var.get()]["status_restored_file"].format(filename=file_path.name)))
                 self.root.after(0, lambda: self._show_copyable_log(
-                    "Import réussi ✓",
-                    f"Config restaurée : {file_path.name}",
+                    UI_STRINGS[self.lang_var.get()]["popup_import_success_title"],
+                    UI_STRINGS[self.lang_var.get()]["log_header_import"].format(filename=file_path.name),
                     log_text,
-                    warn="⚠ Redémarrez l'appareil pour appliquer."))
+                    warn=UI_STRINGS[self.lang_var.get()]["warn_restart_device"]))
             except Exception as e:
                 err = str(e)
                 self.root.after(0, lambda: self.set_status(UI_STRINGS[self.lang_var.get()]["status_import_failed"]))
@@ -3278,7 +3500,7 @@ class NBFMApp:
         fn = filedialog.askopenfilename(
             title=UI_STRINGS[self.lang_var.get()]["sel_choose_config_file"],
             initialdir=str(self.work_dir),
-            filetypes=[("NBFM files", "*.NBFM"), ("JSON/YAML", "*.json *.yaml *.yml"), ("Tous", "*.*")]
+            filetypes=[("NBFM files", "*.NBFM"), ("JSON/YAML", "*.json *.yaml *.yml"), (UI_STRINGS[self.lang_var.get()]["filetype_all"], "*.*")]
         )
         if fn: self._do_import(fn)
 
@@ -3365,7 +3587,7 @@ class NBFMApp:
 
             # Nom suggéré : short_name réel + suffixe MAC (ex: MC_1680)
             # Le suffixe vient de my_info.my_node_num, PAS du champ owner.
-            now     = datetime.now().strftime("%Y%m%d_%H%M%S")
+            now     = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
             owner   = config.get("owner", {}) if isinstance(config.get("owner"), dict) else {}
             sn_raw  = (owner.get("short_name", "") or owner.get("long_name", "")).split("_")[0]
             ln_raw  = owner.get("long_name", "") or owner.get("short_name", "")
@@ -3379,7 +3601,7 @@ class NBFMApp:
                 initialdir=str(self.work_dir),
                 defaultextension=".NBFM",
                 initialfile=suggest,
-                filetypes=[("NBFM files", "*.NBFM"), ("Tous", "*.*")]
+                filetypes=[("NBFM files", "*.NBFM"), (UI_STRINGS[self.lang_var.get()]["filetype_all"], "*.*")]
             )
             if not filename:
                 continue
@@ -3416,13 +3638,14 @@ class NBFMApp:
 
         # Vérification intégrité une seule fois
         warns = validate_config_integrity(config)
-        if warns:
-            if not messagebox.askyesno("⚠ Avertissements d'intégrité",
-                "\n".join(warns) + "\n\nContinuer quand même ?"):
-                return
+        _T = UI_STRINGS[self.lang_var.get()]
+        if warns and not messagebox.askyesno(
+                _T["popup_integrity_title"],
+                _T["popup_integrity_continue_text"].format(warns="\n".join(warns))):
+            return
 
         profile_type = config.get("_profile_type", "complet")
-        type_label   = "⚡ PROFIL FLOTTE" if profile_type == "fleet" else "📦 Sauvegarde complète"
+        type_label   = _T["restore_type_fleet"] if profile_type == "fleet" else _T["restore_type_full"]
 
         def _ask_and_import(count):
             win = tk.Toplevel(self.root)
@@ -3481,10 +3704,9 @@ class NBFMApp:
             if res["action"] == "stop" or res["action"] is None:
                 self.set_status(UI_STRINGS[self.lang_var.get()]["status_multi_import_done"].format(count=count))
                 if count > 0:
-                    messagebox.showinfo("Session terminée",
-                        f"{count} nœud(s) restauré(s) avec succès.\n"
-                        f"{errors} erreur(s).\n\n"
-                        "⚠ Redémarrez chaque appareil pour appliquer.")
+                    _Td = UI_STRINGS[self.lang_var.get()]
+                    messagebox.showinfo(_Td["popup_session_done_title"],
+                        _Td["popup_multi_import_done_text"].format(count=count, errors=errors))
                 break
             if res["action"] == "skip":
                 continue
@@ -3497,11 +3719,12 @@ class NBFMApp:
                 iface.close()
                 count += 1
                 self.set_status(UI_STRINGS[self.lang_var.get()]["status_node_restored"].format(index=count))
+                _Tn = UI_STRINGS[self.lang_var.get()]
                 self._show_copyable_log(
-                    f"Nœud #{count} restauré ✓",
-                    f"Nœud #{count} — {file_path.name}",
+                    _Tn["multi_node_restored_title"].format(index=count),
+                    _Tn["log_header_node"].format(index=count, filename=file_path.name),
                     "\n".join(log_lines),
-                    warn="⚠ Redémarrez l'appareil pour appliquer.")
+                    warn=_Tn["warn_restart_device"])
             except Exception as e:
                 errors += 1
                 messagebox.showerror(UI_STRINGS[self.lang_var.get()]["multi_node_error"].format(index=count + 1), str(e))
@@ -3753,7 +3976,8 @@ class NBFMApp:
 
         # ── Générateur de clé PSK (dans l'onglet Canaux) ─────────────────────
         def generate_key(nb_bytes: int) -> str:
-            import os, base64
+            import base64
+            import os
             return base64.b64encode(os.urandom(nb_bytes)).decode("ascii")
         KEY_SIZES = [("Default", 0), ("128 bits", 16), ("256 bits", 32)]
 
@@ -3965,7 +4189,7 @@ class NBFMApp:
                         initialdir=str(self.work_dir),
                         defaultextension=".NBFM",
                         initialfile=f.stem + "_edited" + f.suffix,
-                        filetypes=[("NBFM files", "*.NBFM"), ("Tous", "*.*")]
+                        filetypes=[("NBFM files", "*.NBFM"), (UI_STRINGS[self.lang_var.get()]["filetype_all"], "*.*")]
                     )
                     if not filename:
                         return
@@ -4064,7 +4288,7 @@ class NBFMApp:
             try:
                 bkdir = get_app_dir() / "Backup"
                 bkdir.mkdir(exist_ok=True)
-                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                stamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
                 shutil.copy2(str(f), str(bkdir / f"{f.stem}_{stamp}{f.suffix}"))
             except Exception:
                 pass
@@ -4097,11 +4321,11 @@ class NBFMApp:
     def copy_file(self):
         f = self._get_selected_file()
         if not f: return
-        now = datetime.now().strftime("%Y%m%d_%H%M%S")
+        now = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
         dest = filedialog.asksaveasfilename(
             title=UI_STRINGS[self.lang_var.get()]["sel_copy_file"], initialdir=str(self.work_dir),
             defaultextension=".NBFM", initialfile=f"{f.stem}_copie_{now}.NBFM",
-            filetypes=[("NBFM files", "*.NBFM"), ("Tous", "*.*")]
+            filetypes=[("NBFM files", "*.NBFM"), (UI_STRINGS[self.lang_var.get()]["filetype_all"], "*.*")]
         )
         if dest:
             try:
