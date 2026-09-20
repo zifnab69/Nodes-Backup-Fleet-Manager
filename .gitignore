@@ -11,6 +11,11 @@ dist/
 # Profil de compilation EXE (chemins et versions propres à chaque machine)
 exeprofil.ini
 
+# Binaires compilés — ils ne vont PAS dans le dépôt.
+# Un .exe se publie en pièce jointe d'une GitHub Release :
+#   https://github.com/zifnab69/Nodes-Backup-Fleet-Manager/releases
+*.exe
+
 # Fichiers générés à l'exécution par NBFM (jamais à versionner)
 NBFM_Config.json
 NBFM_notes.json
@@ -23,8 +28,9 @@ NBFM_report_*.html
 # Dossier de versions horodatées du script (local uniquement, non synchronisé)
 Backup/
 
-# Dossiers d'executables
-Executable/
+# Dossiers d'executables (la règle visait « Executable/ » : le dossier réel
+# s'appelle « Executables/ », la règle ne s'appliquait donc à rien)
+Executables/
 
 # Dossiers de travails
 /Travails

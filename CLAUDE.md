@@ -25,7 +25,7 @@
 ### ▶ POUR REPRENDRE LA PROCHAINE FOIS
 
 - **Fichier de travail actif** : `NBFM_V1.96.py` (= `NBFM_20260920_1704.py` renommé pour partage ; ~4320 lignes, fichier unique). Compile OK. Fonctionnel sur matériel réel (T-Echo, Heltec V3, **Heltec V4**). Le nommage de travail reste `NBFM_YYYYMMDD_HHMM.py` ; un `NBFM_Vx.y.py` est un renommage pour le partage. Prédécesseur `NBFM_V1.95.py` dans `Backup/`. **Avant la prochaine modif** : copier l'actif dans `Backup/` puis le renommer en `NBFM_YYYYMMDD_HHMM.py` (protocole de versioning).
-- ⚠ **`NBFM_V1.95.exe` à la racine du dépôt est périmé** (compilé depuis la v1.95) — à reconstruire via PyInstaller et à remplacer lors de la publication de la release.
+- ⚠ **Les `.exe` ne sont PAS versionnés** (règle `*.exe` + `Executables/` dans `.gitignore` depuis le 20/09/2026). Un exécutable se publie **en pièce jointe d'une GitHub Release**, jamais dans l'arbre du dépôt. Ne jamais faire `git add` d'un `.exe`, même avec `-f`.
 - **Version affichée : v1.96** (docstring d'en-tête, titre de fenêtre, en-tête d'écran, pied de l'onglet Aide — 4 occurrences, à bumper ensemble). À ne pas confondre avec `_app_version` (= `"2.6"`), qui versionne le **format de fichier** `.NBFM` et n'a pas bougé.
 - **État** : application stable. **Aucun bug bloquant.** Tous les bugs A, B, C, E–M sont corrigés et validés. **Seul Bug D reste ouvert** (basse priorité, neutralisé — voir §Bug D).
 - **Avant toute modif** : appliquer le protocole de versioning (timestamp FR → copie dans `Backup/` → renommer en `NBFM_YYYYMMDD_HHMM.py` → modifier → `py_compile`).
@@ -274,6 +274,10 @@ pyinstaller --onefile --windowed --name "NBFM" NBFM_<actif>.py
 # EXE généré dans dist/NBFM.exe
 ```
 Le code gère les deux modes via `get_app_dir()` : `sys.frozen` pour l'EXE, `__file__` pour le source.
+
+> ⚠ **L'EXE produit ne se commite pas.** `*.exe`, `Executables/` et `exeprofil.ini` (profil de
+> compilation, propre à chaque machine) sont dans `.gitignore`. La diffusion d'un binaire se fait
+> **uniquement en pièce jointe d'une GitHub Release**.
 
 ### Convention de nommage des nouveaux scripts
 **Toujours utiliser le format `NBFM_YYYYMMDD_HHMM.py`** (jamais de numéro de version type `V1_78`).
