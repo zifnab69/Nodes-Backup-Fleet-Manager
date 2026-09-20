@@ -120,6 +120,24 @@ def get_app_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
+def _display_path(p) -> str:
+    """Chemin normalisé pour l'AFFICHAGE (séparateurs natifs Windows).
+
+    `filedialog.asksaveasfilename()` / `askopenfilename()` renvoient des chemins
+    à séparateurs « / » (convention Tcl/Tk), y compris sous Windows : les popups
+    affichaient donc « C:/Users/… » au lieu de « C:\\Users\\… ».
+
+    N'affecte QUE l'affichage : les chemins manipulés en interne restent
+    inchangés (Python accepte indifféremment les deux séparateurs), et un objet
+    `Path` — déjà normalisé — traverse cette fonction sans modification.
+    Repli sur `str(p)` en cas de chemin exotique (jamais d'exception)."""
+    try:
+        s = str(p)
+        return str(Path(s)) if s else s
+    except Exception:
+        return str(p)
+
+
 def list_serial_ports() -> list:
     try:
         import serial.tools.list_ports
@@ -3292,7 +3310,7 @@ class NBFMApp:
                         self.set_status(f"✓ {Path(filename).name}")
                         _T = UI_STRINGS[self.lang_var.get()]
                         messagebox.showinfo(_T["popup_export_success_title"],
-                            _T["popup_export_success_text"].format(filename=filename))
+                            _T["popup_export_success_text"].format(filename=_display_path(filename)))
                     except Exception as e:
                         messagebox.showerror(UI_STRINGS[self.lang_var.get()]["popup_save_error_title"], str(e))
 
@@ -3348,7 +3366,7 @@ class NBFMApp:
             self.set_status(UI_STRINGS[self.lang_var.get()]["status_fleet_created"].format(filename=Path(dest).name))
             _T = UI_STRINGS[self.lang_var.get()]
             messagebox.showinfo(_T["popup_fleet_created_title"],
-                                _T["popup_fleet_created_text"].format(dest=dest))
+                                _T["popup_fleet_created_text"].format(dest=_display_path(dest)))
         except Exception as e:
             messagebox.showerror(UI_STRINGS[self.lang_var.get()]["popup_error_title"], str(e))
 
@@ -3434,7 +3452,7 @@ class NBFMApp:
     def _do_import(self, filename: str):
         file_path = Path(filename)
         if not file_path.exists():
-            messagebox.showerror(UI_STRINGS[self.lang_var.get()]["popup_file_not_found"], str(filename)); return
+            messagebox.showerror(UI_STRINGS[self.lang_var.get()]["popup_file_not_found"], _display_path(filename)); return
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 config = json.load(f)
