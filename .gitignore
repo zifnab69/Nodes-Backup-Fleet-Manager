@@ -8,6 +8,9 @@ build/
 dist/
 *.spec
 
+# Profil de compilation EXE (chemins et versions propres à chaque machine)
+exeprofil.ini
+
 # Fichiers générés à l'exécution par NBFM (jamais à versionner)
 NBFM_Config.json
 NBFM_notes.json
@@ -30,6 +33,10 @@ Executable/
 .venv/
 venv/
 env/
+# venv du projet, un par version (venv_NBFM_V1.96, venv_NBFM_V1.97…).
+# Jusqu'ici ils n'étaient ignorés que par le .gitignore interne créé par Python
+# dans le dossier lui-même — règle explicite ici, plus robuste.
+venv_NBFM*/
 
 # Divers IDE / OS
 .vscode/
